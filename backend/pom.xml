@@ -22,6 +22,7 @@
         <jjwt.version>0.12.6</jjwt.version>
         <milvus.version>2.4.2</milvus.version>
         <tika.version>2.9.2</tika.version>
+        <jacoco.version>0.8.12</jacoco.version>
     </properties>
 
     <dependencies>
@@ -115,6 +116,70 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <configuration>
+                    <excludes>
+                        <exclude>com/example/aikb/AiKnowledgeBaseApplication*</exclude>
+                        <exclude>com/example/aikb/config/AppConfig*</exclude>
+                        <exclude>com/example/aikb/config/AppProperties*</exclude>
+                        <exclude>com/example/aikb/config/LlmConfig*</exclude>
+                        <exclude>com/example/aikb/controller/*</exclude>
+                        <exclude>com/example/aikb/dto/*</exclude>
+                        <exclude>com/example/aikb/entity/*</exclude>
+                        <exclude>com/example/aikb/repository/*</exclude>
+                        <exclude>com/example/aikb/security/CustomUserDetailsService*</exclude>
+                        <exclude>com/example/aikb/security/JwtAuthenticationFilter*</exclude>
+                        <exclude>com/example/aikb/security/SecurityConfig*</exclude>
+                        <exclude>com/example/aikb/security/UserPrincipal*</exclude>
+                        <exclude>com/example/aikb/service/ChatService*</exclude>
+                        <exclude>com/example/aikb/service/EmbeddingService*</exclude>
+                        <exclude>com/example/aikb/service/MilvusVectorService*</exclude>
+                        <exclude>com/example/aikb/service/RagService*</exclude>
+                        <exclude>com/example/aikb/service/UserBootstrapService*</exclude>
+                        <exclude>com/example/aikb/util/TikaParserUtil*</exclude>
+                        <exclude>com/example/aikb/agent/AgentService*</exclude>
+                        <exclude>com/example/aikb/agent/KnowledgeAssistant*</exclude>
+                    </excludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>check</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>0.80</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
