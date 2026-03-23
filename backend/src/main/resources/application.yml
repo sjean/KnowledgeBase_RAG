@@ -1,0 +1,60 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: enterprise-ai-kb
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:h2:file:./data/aikb;MODE=MYSQL;AUTO_SERVER=TRUE}
+    username: ${SPRING_DATASOURCE_USERNAME:sa}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+    driver-class-name: org.h2.Driver
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        format_sql: true
+    open-in-view: false
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 20MB
+  cache:
+    type: simple
+
+app:
+  jwt:
+    secret: ${APP_JWT_SECRET:change-this-to-a-long-random-secret-key-at-least-32-bytes}
+    expiration-hours: ${APP_JWT_EXPIRATION_HOURS:12}
+  rag:
+    top-k: ${APP_RAG_TOP_K:3}
+    chunk-size: ${APP_RAG_CHUNK_SIZE:500}
+    chunk-overlap: ${APP_RAG_CHUNK_OVERLAP:50}
+  llm:
+    api-key: ${APP_LLM_API_KEY:YOUR_API_KEY}
+    base-url: ${APP_LLM_BASE_URL:https://open.bigmodel.cn/api/paas/v4/}
+    model-name: ${APP_LLM_MODEL_NAME:glm-5}
+    embedding-model: ${APP_LLM_EMBEDDING_MODEL:embedding-3}
+    log-requests: ${APP_LLM_LOG_REQUESTS:true}
+    log-responses: ${APP_LLM_LOG_RESPONSES:true}
+  milvus:
+    host: ${APP_MILVUS_HOST:127.0.0.1}
+    port: ${APP_MILVUS_PORT:19530}
+    collection-name: ${APP_MILVUS_COLLECTION_NAME:kb_chunks}
+    dimension: ${APP_MILVUS_DIMENSION:2048}
+    index-type: ${APP_MILVUS_INDEX_TYPE:IVF_FLAT}
+    metric-type: ${APP_MILVUS_METRIC_TYPE:COSINE}
+    nlist: ${APP_MILVUS_NLIST:1024}
+    nprobe: ${APP_MILVUS_NPROBE:10}
+  storage:
+    upload-dir: ${APP_STORAGE_UPLOAD_DIR:./data/uploads}
+
+logging:
+  level:
+    root: INFO
+    com.example.aikb: INFO
