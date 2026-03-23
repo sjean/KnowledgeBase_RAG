@@ -40,6 +40,9 @@ class DocumentProcessingServiceTest {
     @Mock
     private ChatCacheService chatCacheService;
 
+    @Mock
+    private DocumentStreamService documentStreamService;
+
     @Test
     void processDocumentShouldParseEmbedAndMarkReady() {
         AppProperties properties = new AppProperties();
@@ -61,7 +64,8 @@ class DocumentProcessingServiceTest {
                 properties,
                 embeddingService,
                 milvusVectorService,
-                chatCacheService
+                chatCacheService,
+                documentStreamService
         );
 
         service.processDocument(1L);
@@ -91,7 +95,8 @@ class DocumentProcessingServiceTest {
                 properties,
                 embeddingService,
                 milvusVectorService,
-                chatCacheService
+                chatCacheService,
+                documentStreamService
         );
 
         service.processDocument(2L);

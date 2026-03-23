@@ -27,19 +27,22 @@ public class DocumentProcessingService {
     private final EmbeddingService embeddingService;
     private final MilvusVectorService milvusVectorService;
     private final ChatCacheService chatCacheService;
+    private final DocumentStreamService documentStreamService;
 
     public DocumentProcessingService(DocumentRecordRepository documentRecordRepository,
                                      TikaParserUtil tikaParserUtil,
                                      AppProperties properties,
                                      EmbeddingService embeddingService,
                                      MilvusVectorService milvusVectorService,
-                                     ChatCacheService chatCacheService) {
+                                     ChatCacheService chatCacheService,
+                                     DocumentStreamService documentStreamService) {
         this.documentRecordRepository = documentRecordRepository;
         this.tikaParserUtil = tikaParserUtil;
         this.properties = properties;
         this.embeddingService = embeddingService;
         this.milvusVectorService = milvusVectorService;
         this.chatCacheService = chatCacheService;
+        this.documentStreamService = documentStreamService;
     }
 
     @Async
@@ -86,5 +89,6 @@ public class DocumentProcessingService {
         }
         documentRecord.setUpdatedAt(LocalDateTime.now());
         documentRecordRepository.save(documentRecord);
+        documentStreamService.publishDocumentChanged(documentRecord, "updated");
     }
 }

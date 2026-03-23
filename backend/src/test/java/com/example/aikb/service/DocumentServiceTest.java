@@ -5,8 +5,9 @@ import com.example.aikb.dto.DocumentItemResponse;
 import com.example.aikb.dto.UploadResponse;
 import com.example.aikb.entity.DocumentRecord;
 import com.example.aikb.entity.DocumentStatus;
-import com.example.aikb.security.UserPrincipal;
 import com.example.aikb.repository.DocumentRecordRepository;
+import com.example.aikb.repository.UserAccountRepository;
+import com.example.aikb.security.UserPrincipal;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -47,6 +48,12 @@ class DocumentServiceTest {
     @Mock
     private ChatCacheService chatCacheService;
 
+    @Mock
+    private DocumentStreamService documentStreamService;
+
+    @Mock
+    private UserAccountRepository userAccountRepository;
+
     @TempDir
     Path tempDir;
 
@@ -64,7 +71,9 @@ class DocumentServiceTest {
                 documentRecordRepository,
                 documentProcessingService,
                 milvusVectorService,
-                chatCacheService
+                chatCacheService,
+                documentStreamService,
+                userAccountRepository
         );
 
         when(documentRecordRepository.saveAndFlush(any(DocumentRecord.class))).thenAnswer(invocation -> {
@@ -101,7 +110,9 @@ class DocumentServiceTest {
                 documentRecordRepository,
                 documentProcessingService,
                 milvusVectorService,
-                chatCacheService
+                chatCacheService,
+                documentStreamService,
+                userAccountRepository
         );
 
         MockMultipartFile file = new MockMultipartFile("file", "script.exe", "application/octet-stream", new byte[]{1});
@@ -119,7 +130,9 @@ class DocumentServiceTest {
                 documentRecordRepository,
                 documentProcessingService,
                 milvusVectorService,
-                chatCacheService
+                chatCacheService,
+                documentStreamService,
+                userAccountRepository
         );
         SecurityContextHolder.getContext().setAuthentication(
                 new TestingAuthenticationToken(new UserPrincipal(1L, "admin", "ADMIN"), null)
@@ -150,7 +163,9 @@ class DocumentServiceTest {
                 documentRecordRepository,
                 documentProcessingService,
                 milvusVectorService,
-                chatCacheService
+                chatCacheService,
+                documentStreamService,
+                userAccountRepository
         );
         SecurityContextHolder.getContext().setAuthentication(
                 new TestingAuthenticationToken(new UserPrincipal(9L, "user", "USER"), null)
@@ -182,7 +197,9 @@ class DocumentServiceTest {
                 documentRecordRepository,
                 documentProcessingService,
                 milvusVectorService,
-                chatCacheService
+                chatCacheService,
+                documentStreamService,
+                userAccountRepository
         );
         when(documentRecordRepository.existsByUserIdAndFileNameIgnoreCase(5L, "notes.txt")).thenReturn(true);
 
@@ -201,7 +218,9 @@ class DocumentServiceTest {
                 documentRecordRepository,
                 documentProcessingService,
                 milvusVectorService,
-                chatCacheService
+                chatCacheService,
+                documentStreamService,
+                userAccountRepository
         );
         SecurityContextHolder.getContext().setAuthentication(
                 new TestingAuthenticationToken(new UserPrincipal(9L, "user", "USER"), null)
@@ -234,6 +253,43 @@ class DocumentServiceTest {
     }
 
     @Test
+    void retryShouldAllowPendingUploadedDocument() throws IOException {
+        AppProperties properties = new AppProperties();
+        DocumentService documentService = new DocumentService(
+                properties,
+                documentRecordRepository,
+                documentProcessingService,
+                milvusVectorService,
+                chatCacheService,
+                documentStreamService,
+                userAccountRepository
+        );
+        SecurityContextHolder.getContext().setAuthentication(
+                new TestingAuthenticationToken(new UserPrincipal(9L, "user", "USER"), null)
+        );
+
+        Path storedFile = Files.createFile(tempDir.resolve("pending.pdf"));
+        DocumentRecord record = new DocumentRecord();
+        record.setId(24L);
+        record.setUserId(9L);
+        record.setFileName("pending.pdf");
+        record.setStoragePath(storedFile.toString());
+        record.setStatus(DocumentStatus.UPLOADED);
+        record.setChunkCount(0);
+        record.setCreatedAt(LocalDateTime.now().minusMinutes(5));
+        record.setUpdatedAt(LocalDateTime.now().minusMinutes(1));
+
+        when(documentRecordRepository.findByIdAndUserId(24L, 9L)).thenReturn(java.util.Optional.of(record));
+        when(documentRecordRepository.saveAndFlush(record)).thenReturn(record);
+
+        DocumentItemResponse response = documentService.retryDocument(24L);
+
+        assertThat(response.status()).isEqualTo("UPLOADED");
+        verify(milvusVectorService).deleteDocumentChunks(9L, 24L, "pending.pdf", false);
+        verify(documentProcessingService).processDocument(24L);
+    }
+
+    @Test
     void deleteShouldRemoveFileVectorsAndRecord() throws IOException {
         AppProperties properties = new AppProperties();
         DocumentService documentService = new DocumentService(
@@ -241,7 +297,9 @@ class DocumentServiceTest {
                 documentRecordRepository,
                 documentProcessingService,
                 milvusVectorService,
-                chatCacheService
+                chatCacheService,
+                documentStreamService,
+                userAccountRepository
         );
         SecurityContextHolder.getContext().setAuthentication(
                 new TestingAuthenticationToken(new UserPrincipal(9L, "user", "USER"), null)
@@ -275,7 +333,9 @@ class DocumentServiceTest {
                 documentRecordRepository,
                 documentProcessingService,
                 milvusVectorService,
-                chatCacheService
+                chatCacheService,
+                documentStreamService,
+                userAccountRepository
         );
         SecurityContextHolder.getContext().setAuthentication(
                 new TestingAuthenticationToken(new UserPrincipal(9L, "user", "USER"), null)

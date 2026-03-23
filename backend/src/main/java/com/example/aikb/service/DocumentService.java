@@ -2,11 +2,17 @@ package com.example.aikb.service;
 
 import com.example.aikb.config.AppProperties;
 import com.example.aikb.dto.DocumentItemResponse;
+import com.example.aikb.dto.PageResponse;
 import com.example.aikb.dto.UploadResponse;
 import com.example.aikb.entity.DocumentRecord;
 import com.example.aikb.entity.DocumentStatus;
 import com.example.aikb.repository.DocumentRecordRepository;
+import com.example.aikb.repository.UserAccountRepository;
 import com.example.aikb.util.SecurityUtils;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -15,7 +21,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -26,17 +34,23 @@ public class DocumentService {
     private final DocumentProcessingService documentProcessingService;
     private final MilvusVectorService milvusVectorService;
     private final ChatCacheService chatCacheService;
+    private final DocumentStreamService documentStreamService;
+    private final UserAccountRepository userAccountRepository;
 
     public DocumentService(AppProperties properties,
                            DocumentRecordRepository documentRecordRepository,
                            DocumentProcessingService documentProcessingService,
                            MilvusVectorService milvusVectorService,
-                           ChatCacheService chatCacheService) {
+                           ChatCacheService chatCacheService,
+                           DocumentStreamService documentStreamService,
+                           UserAccountRepository userAccountRepository) {
         this.properties = properties;
         this.documentRecordRepository = documentRecordRepository;
         this.documentProcessingService = documentProcessingService;
         this.milvusVectorService = milvusVectorService;
         this.chatCacheService = chatCacheService;
+        this.documentStreamService = documentStreamService;
+        this.userAccountRepository = userAccountRepository;
     }
 
     public UploadResponse upload(Long userId, MultipartFile file) {
@@ -59,6 +73,7 @@ public class DocumentService {
         documentRecord.setCreatedAt(LocalDateTime.now());
         documentRecord.setUpdatedAt(LocalDateTime.now());
         documentRecordRepository.saveAndFlush(documentRecord);
+        documentStreamService.publishDocumentChanged(documentRecord, "uploaded");
         documentProcessingService.processDocument(documentRecord.getId());
 
         return new UploadResponse(documentRecord.getId(), filename, documentRecord.getStatus().name(), progressOf(documentRecord.getStatus()), "文档已上传，后台正在处理中");
@@ -76,13 +91,35 @@ public class DocumentService {
         List<DocumentRecord> records = SecurityUtils.isAdmin()
                 ? documentRecordRepository.findAllByOrderByCreatedAtDesc()
                 : documentRecordRepository.findByUserIdOrderByCreatedAtDesc(SecurityUtils.currentUser().userId());
-        return records.stream().map(this::toResponse).toList();
+        return toResponses(records);
+    }
+
+    public PageResponse<DocumentItemResponse> listDocuments(String keyword, int page, int size) {
+        Pageable pageable = PageRequest.of(Math.max(page, 0), sanitizePageSize(size), Sort.by(Sort.Direction.DESC, "createdAt"));
+        Page<DocumentRecord> resultPage;
+        if (SecurityUtils.isAdmin()) {
+            resultPage = normalizeKeyword(keyword).isBlank()
+                    ? documentRecordRepository.findAll(pageable)
+                    : documentRecordRepository.searchAllForAdmin(normalizeKeyword(keyword), pageable);
+        } else {
+            resultPage = normalizeKeyword(keyword).isBlank()
+                    ? documentRecordRepository.findByUserId(SecurityUtils.currentUser().userId(), pageable)
+                    : documentRecordRepository.findByUserIdAndFileNameContainingIgnoreCase(SecurityUtils.currentUser().userId(), normalizeKeyword(keyword), pageable);
+        }
+        return new PageResponse<>(
+                toResponses(resultPage.getContent()),
+                resultPage.getTotalElements(),
+                resultPage.getTotalPages(),
+                resultPage.getNumber(),
+                resultPage.getSize()
+        );
     }
 
     public DocumentItemResponse retryDocument(Long documentId) {
         DocumentRecord record = loadAccessibleDocument(documentId);
-        if (record.getStatus() != DocumentStatus.FAILED) {
-            throw new IllegalArgumentException("Only failed documents can be retried");
+        DocumentStatus status = record.getStatus() == null ? DocumentStatus.UPLOADED : record.getStatus();
+        if (status != DocumentStatus.FAILED && status != DocumentStatus.UPLOADED) {
+            throw new IllegalArgumentException("Only failed or pending documents can be retried");
         }
         ensureStoredFileExists(record);
         milvusVectorService.deleteDocumentChunks(record.getUserId(), record.getId(), record.getFileName(), SecurityUtils.isAdmin());
@@ -94,6 +131,7 @@ public class DocumentService {
         documentRecordRepository.saveAndFlush(record);
         documentProcessingService.processDocument(record.getId());
         chatCacheService.evictUser(record.getUserId());
+        documentStreamService.publishDocumentChanged(record, "retried");
         return toResponse(record);
     }
 
@@ -106,6 +144,7 @@ public class DocumentService {
         deleteStoredFile(record.getStoragePath());
         documentRecordRepository.delete(record);
         chatCacheService.evictUser(record.getUserId());
+        documentStreamService.publishDocumentDeleted(record.getUserId(), record.getId());
     }
 
     private void validateFileType(String filename) {
@@ -161,10 +200,25 @@ public class DocumentService {
     }
 
     private DocumentItemResponse toResponse(DocumentRecord record) {
+        return toResponse(record, null);
+    }
+
+    private List<DocumentItemResponse> toResponses(List<DocumentRecord> records) {
+        Map<Long, String> usernames = new HashMap<>();
+        userAccountRepository.findAllById(records.stream().map(DocumentRecord::getUserId).distinct().toList())
+                .forEach(user -> usernames.put(user.getId(), user.getUsername()));
+        return records.stream()
+                .map(record -> toResponse(record, usernames.get(record.getUserId())))
+                .toList();
+    }
+
+    private DocumentItemResponse toResponse(DocumentRecord record, String ownerUsername) {
         DocumentStatus status = record.getStatus() == null ? inferLegacyStatus(record) : record.getStatus();
         return new DocumentItemResponse(
                 record.getId(),
                 record.getFileName(),
+                record.getUserId(),
+                ownerUsername,
                 status.name(),
                 progressOf(status),
                 record.getChunkCount(),
@@ -172,6 +226,17 @@ public class DocumentService {
                 record.getCreatedAt(),
                 record.getUpdatedAt() == null ? record.getCreatedAt() : record.getUpdatedAt()
         );
+    }
+
+    private String normalizeKeyword(String keyword) {
+        return keyword == null ? "" : keyword.trim();
+    }
+
+    private int sanitizePageSize(int size) {
+        if (size <= 0) {
+            return 10;
+        }
+        return Math.min(size, 50);
     }
 
     private int progressOf(DocumentStatus status) {
