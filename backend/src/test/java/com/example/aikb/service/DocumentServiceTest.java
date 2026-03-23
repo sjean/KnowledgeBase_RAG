@@ -4,6 +4,7 @@ import com.example.aikb.config.AppProperties;
 import com.example.aikb.dto.DocumentItemResponse;
 import com.example.aikb.dto.UploadResponse;
 import com.example.aikb.entity.DocumentRecord;
+import com.example.aikb.entity.DocumentStatus;
 import com.example.aikb.security.UserPrincipal;
 import com.example.aikb.repository.DocumentRecordRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -27,6 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -38,6 +40,12 @@ class DocumentServiceTest {
 
     @Mock
     private DocumentProcessingService documentProcessingService;
+
+    @Mock
+    private MilvusVectorService milvusVectorService;
+
+    @Mock
+    private ChatCacheService chatCacheService;
 
     @TempDir
     Path tempDir;
@@ -51,13 +59,20 @@ class DocumentServiceTest {
     void uploadShouldPersistFileAndDispatchAsyncProcessing() throws IOException {
         AppProperties properties = new AppProperties();
         properties.getStorage().setUploadDir(tempDir.toString());
-        DocumentService documentService = new DocumentService(properties, documentRecordRepository, documentProcessingService);
+        DocumentService documentService = new DocumentService(
+                properties,
+                documentRecordRepository,
+                documentProcessingService,
+                milvusVectorService,
+                chatCacheService
+        );
 
         when(documentRecordRepository.saveAndFlush(any(DocumentRecord.class))).thenAnswer(invocation -> {
             DocumentRecord record = invocation.getArgument(0);
             record.setId(101L);
             return record;
         });
+        when(documentRecordRepository.existsByUserIdAndFileNameIgnoreCase(5L, "notes.txt")).thenReturn(false);
 
         MockMultipartFile file = new MockMultipartFile("file", "notes.txt", "text/plain", "hello world".getBytes());
         UploadResponse response = documentService.upload(5L, file);
@@ -81,7 +96,13 @@ class DocumentServiceTest {
     void uploadShouldRejectUnsupportedFileType() {
         AppProperties properties = new AppProperties();
         properties.getStorage().setUploadDir(tempDir.toString());
-        DocumentService documentService = new DocumentService(properties, documentRecordRepository, documentProcessingService);
+        DocumentService documentService = new DocumentService(
+                properties,
+                documentRecordRepository,
+                documentProcessingService,
+                milvusVectorService,
+                chatCacheService
+        );
 
         MockMultipartFile file = new MockMultipartFile("file", "script.exe", "application/octet-stream", new byte[]{1});
 
@@ -93,7 +114,13 @@ class DocumentServiceTest {
     @Test
     void listDocumentsShouldUseAdminQueryAndInferLegacyReadyStatus() {
         AppProperties properties = new AppProperties();
-        DocumentService documentService = new DocumentService(properties, documentRecordRepository, documentProcessingService);
+        DocumentService documentService = new DocumentService(
+                properties,
+                documentRecordRepository,
+                documentProcessingService,
+                milvusVectorService,
+                chatCacheService
+        );
         SecurityContextHolder.getContext().setAuthentication(
                 new TestingAuthenticationToken(new UserPrincipal(1L, "admin", "ADMIN"), null)
         );
@@ -118,7 +145,13 @@ class DocumentServiceTest {
     @Test
     void listDocumentsShouldUseCurrentUserQueryForNonAdmin() {
         AppProperties properties = new AppProperties();
-        DocumentService documentService = new DocumentService(properties, documentRecordRepository, documentProcessingService);
+        DocumentService documentService = new DocumentService(
+                properties,
+                documentRecordRepository,
+                documentProcessingService,
+                milvusVectorService,
+                chatCacheService
+        );
         SecurityContextHolder.getContext().setAuthentication(
                 new TestingAuthenticationToken(new UserPrincipal(9L, "user", "USER"), null)
         );
@@ -138,5 +171,127 @@ class DocumentServiceTest {
         assertThat(documents).hasSize(1);
         assertThat(documents.get(0).status()).isEqualTo("FAILED");
         verify(documentRecordRepository).findByUserIdOrderByCreatedAtDesc(9L);
+    }
+
+    @Test
+    void uploadShouldRejectDuplicateFileNameForSameUser() {
+        AppProperties properties = new AppProperties();
+        properties.getStorage().setUploadDir(tempDir.toString());
+        DocumentService documentService = new DocumentService(
+                properties,
+                documentRecordRepository,
+                documentProcessingService,
+                milvusVectorService,
+                chatCacheService
+        );
+        when(documentRecordRepository.existsByUserIdAndFileNameIgnoreCase(5L, "notes.txt")).thenReturn(true);
+
+        MockMultipartFile file = new MockMultipartFile("file", "notes.txt", "text/plain", "hello world".getBytes());
+
+        assertThatThrownBy(() -> documentService.upload(5L, file))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A document with the same file name already exists. Delete it first or rename the file.");
+    }
+
+    @Test
+    void retryShouldResetFailedDocumentAndDispatchAsyncProcessing() throws IOException {
+        AppProperties properties = new AppProperties();
+        DocumentService documentService = new DocumentService(
+                properties,
+                documentRecordRepository,
+                documentProcessingService,
+                milvusVectorService,
+                chatCacheService
+        );
+        SecurityContextHolder.getContext().setAuthentication(
+                new TestingAuthenticationToken(new UserPrincipal(9L, "user", "USER"), null)
+        );
+
+        Path storedFile = Files.createFile(tempDir.resolve("failed.txt"));
+        DocumentRecord record = new DocumentRecord();
+        record.setId(21L);
+        record.setUserId(9L);
+        record.setFileName("failed.txt");
+        record.setStoragePath(storedFile.toString());
+        record.setStatus(DocumentStatus.FAILED);
+        record.setChunkCount(2);
+        record.setErrorMessage("broken embedding");
+        record.setCreatedAt(LocalDateTime.now().minusMinutes(5));
+        record.setUpdatedAt(LocalDateTime.now().minusMinutes(1));
+
+        when(documentRecordRepository.findByIdAndUserId(21L, 9L)).thenReturn(java.util.Optional.of(record));
+        when(documentRecordRepository.saveAndFlush(record)).thenReturn(record);
+
+        DocumentItemResponse response = documentService.retryDocument(21L);
+
+        assertThat(response.status()).isEqualTo("UPLOADED");
+        assertThat(response.progress()).isEqualTo(10);
+        assertThat(record.getChunkCount()).isZero();
+        assertThat(record.getErrorMessage()).isNull();
+        verify(milvusVectorService).deleteDocumentChunks(9L, 21L, "failed.txt", false);
+        verify(documentProcessingService).processDocument(21L);
+        verify(chatCacheService).evictUser(9L);
+    }
+
+    @Test
+    void deleteShouldRemoveFileVectorsAndRecord() throws IOException {
+        AppProperties properties = new AppProperties();
+        DocumentService documentService = new DocumentService(
+                properties,
+                documentRecordRepository,
+                documentProcessingService,
+                milvusVectorService,
+                chatCacheService
+        );
+        SecurityContextHolder.getContext().setAuthentication(
+                new TestingAuthenticationToken(new UserPrincipal(9L, "user", "USER"), null)
+        );
+
+        Path storedFile = Files.createFile(tempDir.resolve("guide.txt"));
+        DocumentRecord record = new DocumentRecord();
+        record.setId(22L);
+        record.setUserId(9L);
+        record.setFileName("guide.txt");
+        record.setStoragePath(storedFile.toString());
+        record.setStatus(DocumentStatus.READY);
+        record.setCreatedAt(LocalDateTime.now());
+        record.setUpdatedAt(LocalDateTime.now());
+
+        when(documentRecordRepository.findByIdAndUserId(22L, 9L)).thenReturn(java.util.Optional.of(record));
+
+        documentService.deleteDocument(22L);
+
+        assertThat(Files.exists(storedFile)).isFalse();
+        verify(milvusVectorService).deleteDocumentChunks(9L, 22L, "guide.txt", false);
+        verify(documentRecordRepository).delete(record);
+        verify(chatCacheService).evictUser(9L);
+    }
+
+    @Test
+    void deleteShouldRejectProcessingDocument() {
+        AppProperties properties = new AppProperties();
+        DocumentService documentService = new DocumentService(
+                properties,
+                documentRecordRepository,
+                documentProcessingService,
+                milvusVectorService,
+                chatCacheService
+        );
+        SecurityContextHolder.getContext().setAuthentication(
+                new TestingAuthenticationToken(new UserPrincipal(9L, "user", "USER"), null)
+        );
+
+        DocumentRecord record = new DocumentRecord();
+        record.setId(23L);
+        record.setUserId(9L);
+        record.setFileName("running.txt");
+        record.setStatus(DocumentStatus.PARSING);
+
+        when(documentRecordRepository.findByIdAndUserId(23L, 9L)).thenReturn(java.util.Optional.of(record));
+
+        assertThatThrownBy(() -> documentService.deleteDocument(23L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Document is being processed and cannot be deleted right now");
+        verify(milvusVectorService, never()).deleteDocumentChunks(any(), any(), any(), any(Boolean.class));
     }
 }

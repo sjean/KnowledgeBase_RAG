@@ -13,3 +13,11 @@ export function uploadFile(file) {
 export function fetchDocuments() {
   return http.get('/file/documents')
 }
+
+export function retryDocument(documentId) {
+  return http.post(`/file/documents/${documentId}/retry`)
+}
+
+export function deleteDocument(documentId) {
+  return http.delete(`/file/documents/${documentId}`)
+}

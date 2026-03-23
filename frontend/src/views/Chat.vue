@@ -3,14 +3,15 @@ import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { me } from '../api/auth'
 import { askQuestion } from '../api/chat'
-import { fetchDocuments, uploadFile } from '../api/file'
+import { deleteDocument, fetchDocuments, retryDocument, uploadFile } from '../api/file'
 
 const router = useRouter()
 const state = reactive({
   user: null,
   question: '',
   uploading: false,
-  chatting: false
+  chatting: false,
+  actioningDocumentIds: {}
 })
 const documents = ref([])
 let pollTimer = null
@@ -103,6 +104,66 @@ async function handleFileChange(event) {
   }
 }
 
+function isDocumentActioning(documentId) {
+  return Boolean(state.actioningDocumentIds[documentId])
+}
+
+async function handleRetry(doc) {
+  if (isDocumentActioning(doc.documentId) || doc.status !== 'FAILED') {
+    return
+  }
+  state.actioningDocumentIds[doc.documentId] = true
+  try {
+    await retryDocument(doc.documentId)
+    await loadDocuments()
+    messages.value.push({
+      role: 'assistant',
+      answer: `已重新加入处理队列：${doc.fileName}。`,
+      sources: [],
+      toolUsed: null
+    })
+  } catch (error) {
+    messages.value.push({
+      role: 'assistant',
+      answer: error.response?.data?.message || '重试失败，请稍后再试。',
+      sources: [],
+      toolUsed: null
+    })
+  } finally {
+    delete state.actioningDocumentIds[doc.documentId]
+  }
+}
+
+async function handleDelete(doc) {
+  if (isDocumentActioning(doc.documentId)) {
+    return
+  }
+  const confirmed = window.confirm(`确认删除文档《${doc.fileName}》吗？`)
+  if (!confirmed) {
+    return
+  }
+  state.actioningDocumentIds[doc.documentId] = true
+  try {
+    await deleteDocument(doc.documentId)
+    await loadDocuments()
+    messages.value.push({
+      role: 'assistant',
+      answer: `文档已删除：${doc.fileName}。`,
+      sources: [],
+      toolUsed: null
+    })
+  } catch (error) {
+    messages.value.push({
+      role: 'assistant',
+      answer: error.response?.data?.message || '删除失败，请稍后再试。',
+      sources: [],
+      toolUsed: null
+    })
+  } finally {
+    delete state.actioningDocumentIds[doc.documentId]
+  }
+}
+
 function logout() {
   localStorage.removeItem('token')
   router.push('/login')
@@ -166,6 +227,22 @@ onUnmounted(() => {
           <div class="doc-meta">
             <span>{{ doc.progress }}%</span>
             <span v-if="doc.chunkCount">chunks: {{ doc.chunkCount }}</span>
+          </div>
+          <div class="doc-actions">
+            <button
+              class="doc-action secondary"
+              :disabled="isDocumentActioning(doc.documentId) || ['PARSING', 'EMBEDDING'].includes(doc.status)"
+              @click="handleDelete(doc)"
+            >
+              {{ isDocumentActioning(doc.documentId) ? '处理中...' : '删除' }}
+            </button>
+            <button
+              class="doc-action primary"
+              :disabled="isDocumentActioning(doc.documentId) || doc.status !== 'FAILED'"
+              @click="handleRetry(doc)"
+            >
+              重试
+            </button>
           </div>
           <div v-if="doc.errorMessage" class="doc-error">{{ doc.errorMessage }}</div>
         </div>
@@ -329,6 +406,35 @@ onUnmounted(() => {
   color: var(--danger);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.doc-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.doc-action {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+}
+
+.doc-action.primary {
+  background: rgba(29, 78, 216, 0.1);
+  color: #1d4ed8;
+}
+
+.doc-action.secondary {
+  color: var(--danger);
+}
+
+.doc-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .upload,

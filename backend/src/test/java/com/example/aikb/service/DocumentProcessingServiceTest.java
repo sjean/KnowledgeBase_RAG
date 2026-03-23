@@ -9,7 +9,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.cache.concurrent.ConcurrentMapCacheManager;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -20,6 +19,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -37,14 +37,14 @@ class DocumentProcessingServiceTest {
     @Mock
     private MilvusVectorService milvusVectorService;
 
+    @Mock
+    private ChatCacheService chatCacheService;
+
     @Test
     void processDocumentShouldParseEmbedAndMarkReady() {
         AppProperties properties = new AppProperties();
         properties.getRag().setChunkSize(4);
         properties.getRag().setChunkOverlap(1);
-        ConcurrentMapCacheManager cacheManager = new ConcurrentMapCacheManager("chatAnswers");
-        cacheManager.getCache("chatAnswers").put("cached-question", "cached-answer");
-
         DocumentRecord record = new DocumentRecord();
         record.setId(1L);
         record.setUserId(8L);
@@ -61,23 +61,21 @@ class DocumentProcessingServiceTest {
                 properties,
                 embeddingService,
                 milvusVectorService,
-                cacheManager
+                chatCacheService
         );
 
         service.processDocument(1L);
 
         assertThat(record.getStatus()).isEqualTo(DocumentStatus.READY);
         assertThat(record.getChunkCount()).isEqualTo(2);
-        assertThat(cacheManager.getCache("chatAnswers").get("cached-question")).isNull();
-        verify(milvusVectorService).storeChunks(eq(8L), eq("doc.txt"), eq(List.of("abcd", "de")), any());
+        verify(milvusVectorService).storeChunks(eq(8L), eq(1L), eq("doc.txt"), eq(List.of("abcd", "de")), any());
+        verify(chatCacheService).evictUser(8L);
         verify(documentRecordRepository, atLeastOnce()).save(record);
     }
 
     @Test
     void processDocumentShouldMarkFailedWhenParsingThrows() {
         AppProperties properties = new AppProperties();
-        ConcurrentMapCacheManager cacheManager = new ConcurrentMapCacheManager("chatAnswers");
-
         DocumentRecord record = new DocumentRecord();
         record.setId(2L);
         record.setUserId(3L);
@@ -93,13 +91,14 @@ class DocumentProcessingServiceTest {
                 properties,
                 embeddingService,
                 milvusVectorService,
-                cacheManager
+                chatCacheService
         );
 
         service.processDocument(2L);
 
         assertThat(record.getStatus()).isEqualTo(DocumentStatus.FAILED);
         assertThat(record.getErrorMessage()).contains("parse failed");
+        verify(chatCacheService, never()).evictUser(any());
         verify(documentRecordRepository, atLeastOnce()).save(record);
     }
 }

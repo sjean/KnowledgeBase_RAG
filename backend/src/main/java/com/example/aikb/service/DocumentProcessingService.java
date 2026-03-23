@@ -6,7 +6,6 @@ import com.example.aikb.entity.DocumentStatus;
 import com.example.aikb.repository.DocumentRecordRepository;
 import com.example.aikb.util.TextChunker;
 import com.example.aikb.util.TikaParserUtil;
-import org.springframework.cache.CacheManager;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.slf4j.Logger;
@@ -27,20 +26,20 @@ public class DocumentProcessingService {
     private final AppProperties properties;
     private final EmbeddingService embeddingService;
     private final MilvusVectorService milvusVectorService;
-    private final CacheManager cacheManager;
+    private final ChatCacheService chatCacheService;
 
     public DocumentProcessingService(DocumentRecordRepository documentRecordRepository,
                                      TikaParserUtil tikaParserUtil,
                                      AppProperties properties,
                                      EmbeddingService embeddingService,
                                      MilvusVectorService milvusVectorService,
-                                     CacheManager cacheManager) {
+                                     ChatCacheService chatCacheService) {
         this.documentRecordRepository = documentRecordRepository;
         this.tikaParserUtil = tikaParserUtil;
         this.properties = properties;
         this.embeddingService = embeddingService;
         this.milvusVectorService = milvusVectorService;
-        this.cacheManager = cacheManager;
+        this.chatCacheService = chatCacheService;
     }
 
     @Async
@@ -61,10 +60,16 @@ public class DocumentProcessingService {
             for (String chunk : chunks) {
                 vectors.add(embeddingService.embed(chunk));
             }
-            milvusVectorService.storeChunks(documentRecord.getUserId(), documentRecord.getFileName(), chunks, vectors);
+            milvusVectorService.storeChunks(
+                    documentRecord.getUserId(),
+                    documentRecord.getId(),
+                    documentRecord.getFileName(),
+                    chunks,
+                    vectors
+            );
 
             updateStatus(documentRecord, DocumentStatus.READY, null, chunks.size());
-            evictChatCache();
+            chatCacheService.evictUser(documentRecord.getUserId());
         } catch (Exception exception) {
             log.error("Async document processing failed, documentId={}", documentId, exception);
             documentRecordRepository.findById(documentId).ifPresent(record ->
@@ -81,12 +86,5 @@ public class DocumentProcessingService {
         }
         documentRecord.setUpdatedAt(LocalDateTime.now());
         documentRecordRepository.save(documentRecord);
-    }
-
-    private void evictChatCache() {
-        var cache = cacheManager.getCache("chatAnswers");
-        if (cache != null) {
-            cache.clear();
-        }
     }
 }

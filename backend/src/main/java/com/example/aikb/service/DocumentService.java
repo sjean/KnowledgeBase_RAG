@@ -24,18 +24,25 @@ public class DocumentService {
     private final AppProperties properties;
     private final DocumentRecordRepository documentRecordRepository;
     private final DocumentProcessingService documentProcessingService;
+    private final MilvusVectorService milvusVectorService;
+    private final ChatCacheService chatCacheService;
 
     public DocumentService(AppProperties properties,
                            DocumentRecordRepository documentRecordRepository,
-                           DocumentProcessingService documentProcessingService) {
+                           DocumentProcessingService documentProcessingService,
+                           MilvusVectorService milvusVectorService,
+                           ChatCacheService chatCacheService) {
         this.properties = properties;
         this.documentRecordRepository = documentRecordRepository;
         this.documentProcessingService = documentProcessingService;
+        this.milvusVectorService = milvusVectorService;
+        this.chatCacheService = chatCacheService;
     }
 
     public UploadResponse upload(Long userId, MultipartFile file) {
         String filename = file.getOriginalFilename() == null ? "unknown.txt" : file.getOriginalFilename();
         validateFileType(filename);
+        validateDuplicateFileName(userId, filename);
 
         Path uploadDir = Path.of(properties.getStorage().getUploadDir());
         String storedFileName = UUID.randomUUID() + "-" + filename;
@@ -72,10 +79,45 @@ public class DocumentService {
         return records.stream().map(this::toResponse).toList();
     }
 
+    public DocumentItemResponse retryDocument(Long documentId) {
+        DocumentRecord record = loadAccessibleDocument(documentId);
+        if (record.getStatus() != DocumentStatus.FAILED) {
+            throw new IllegalArgumentException("Only failed documents can be retried");
+        }
+        ensureStoredFileExists(record);
+        milvusVectorService.deleteDocumentChunks(record.getUserId(), record.getId(), record.getFileName(), SecurityUtils.isAdmin());
+
+        record.setStatus(DocumentStatus.UPLOADED);
+        record.setChunkCount(0);
+        record.setErrorMessage(null);
+        record.setUpdatedAt(LocalDateTime.now());
+        documentRecordRepository.saveAndFlush(record);
+        documentProcessingService.processDocument(record.getId());
+        chatCacheService.evictUser(record.getUserId());
+        return toResponse(record);
+    }
+
+    public void deleteDocument(Long documentId) {
+        DocumentRecord record = loadAccessibleDocument(documentId);
+        if (isProcessing(record.getStatus())) {
+            throw new IllegalArgumentException("Document is being processed and cannot be deleted right now");
+        }
+        milvusVectorService.deleteDocumentChunks(record.getUserId(), record.getId(), record.getFileName(), SecurityUtils.isAdmin());
+        deleteStoredFile(record.getStoragePath());
+        documentRecordRepository.delete(record);
+        chatCacheService.evictUser(record.getUserId());
+    }
+
     private void validateFileType(String filename) {
         String lower = filename.toLowerCase();
         if (!(lower.endsWith(".pdf") || lower.endsWith(".doc") || lower.endsWith(".docx") || lower.endsWith(".txt"))) {
             throw new IllegalArgumentException("Only PDF, Word, and TXT files are supported");
+        }
+    }
+
+    private void validateDuplicateFileName(Long userId, String filename) {
+        if (documentRecordRepository.existsByUserIdAndFileNameIgnoreCase(userId, filename)) {
+            throw new IllegalArgumentException("A document with the same file name already exists. Delete it first or rename the file.");
         }
     }
 
@@ -86,6 +128,36 @@ public class DocumentService {
         } catch (IOException exception) {
             throw new IllegalStateException("Failed to store uploaded file", exception);
         }
+    }
+
+    private void deleteStoredFile(String storagePath) {
+        if (storagePath == null || storagePath.isBlank()) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(Path.of(storagePath));
+        } catch (IOException exception) {
+            throw new IllegalStateException("Failed to delete stored file", exception);
+        }
+    }
+
+    private void ensureStoredFileExists(DocumentRecord record) {
+        if (record.getStoragePath() == null || record.getStoragePath().isBlank() || Files.notExists(Path.of(record.getStoragePath()))) {
+            throw new IllegalArgumentException("Stored file is missing, please upload the document again");
+        }
+    }
+
+    private DocumentRecord loadAccessibleDocument(Long documentId) {
+        if (SecurityUtils.isAdmin()) {
+            return documentRecordRepository.findById(documentId)
+                    .orElseThrow(() -> new IllegalArgumentException("Document not found"));
+        }
+        return documentRecordRepository.findByIdAndUserId(documentId, SecurityUtils.currentUser().userId())
+                .orElseThrow(() -> new IllegalArgumentException("Document not found"));
+    }
+
+    private boolean isProcessing(DocumentStatus status) {
+        return status == DocumentStatus.PARSING || status == DocumentStatus.EMBEDDING;
     }
 
     private DocumentItemResponse toResponse(DocumentRecord record) {

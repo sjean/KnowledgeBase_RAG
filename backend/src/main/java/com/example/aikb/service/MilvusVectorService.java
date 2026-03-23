@@ -17,9 +17,11 @@ import io.milvus.param.collection.FieldType;
 import io.milvus.param.collection.FlushParam;
 import io.milvus.param.collection.HasCollectionParam;
 import io.milvus.param.collection.LoadCollectionParam;
+import io.milvus.param.dml.DeleteParam;
 import io.milvus.param.dml.InsertParam;
 import io.milvus.param.dml.SearchParam;
 import io.milvus.param.index.CreateIndexParam;
+import io.milvus.response.DescCollResponseWrapper;
 import io.milvus.response.QueryResultsWrapper;
 import io.milvus.response.SearchResultsWrapper;
 import jakarta.annotation.PostConstruct;
@@ -30,6 +32,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
@@ -39,6 +42,7 @@ public class MilvusVectorService {
 
     private final AppProperties properties;
     private MilvusServiceClient milvusClient;
+    private volatile boolean documentIdFieldEnabled = true;
 
     public MilvusVectorService(AppProperties properties) {
         this.properties = properties;
@@ -55,25 +59,30 @@ public class MilvusVectorService {
         createCollectionIfNeeded();
     }
 
-    public void storeChunks(Long userId, String fileName, List<String> chunks, List<List<Float>> vectors) {
+    public void storeChunks(Long userId, Long documentId, String fileName, List<String> chunks, List<List<Float>> vectors) {
         if (chunks.isEmpty()) {
             return;
         }
 
         List<InsertParam.Field> fields = new ArrayList<>();
         List<Long> userIds = new ArrayList<>();
+        List<Long> documentIds = new ArrayList<>();
         List<String> chunkIds = new ArrayList<>();
         List<String> fileNames = new ArrayList<>();
         List<String> contents = new ArrayList<>();
 
         for (int i = 0; i < chunks.size(); i++) {
             userIds.add(userId);
-            chunkIds.add(fileName + "-" + i + "-" + UUID.randomUUID());
+            documentIds.add(documentId);
+            chunkIds.add("doc-" + documentId + "-" + i + "-" + UUID.randomUUID());
             fileNames.add(fileName);
             contents.add(chunks.get(i));
         }
 
         fields.add(new InsertParam.Field("user_id", userIds));
+        if (documentIdFieldEnabled) {
+            fields.add(new InsertParam.Field("document_id", documentIds));
+        }
         fields.add(new InsertParam.Field("chunk_id", chunkIds));
         fields.add(new InsertParam.Field("file_name", fileNames));
         fields.add(new InsertParam.Field("content", contents));
@@ -124,6 +133,22 @@ public class MilvusVectorService {
         return result;
     }
 
+    public void deleteDocumentChunks(Long userId, Long documentId, String fileName, boolean admin) {
+        String expr = buildDeleteExpr(userId, documentId, fileName, admin);
+        R<MutationResult> response = milvusClient.delete(
+                DeleteParam.newBuilder()
+                        .withCollectionName(properties.getMilvus().getCollectionName())
+                        .withExpr(expr)
+                        .build()
+        );
+        if (response.getStatus() != R.Status.Success.getCode()) {
+            throw new IllegalStateException("Milvus delete failed: " + response.getMessage());
+        }
+        milvusClient.flush(FlushParam.newBuilder()
+                .withCollectionNames(List.of(properties.getMilvus().getCollectionName()))
+                .build());
+    }
+
     private void createCollectionIfNeeded() {
         String collectionName = properties.getMilvus().getCollectionName();
         boolean exists = milvusClient.hasCollection(
@@ -131,7 +156,12 @@ public class MilvusVectorService {
         ).getData();
 
         if (exists) {
-            ensureCollectionDimension(collectionName, properties.getMilvus().getDimension());
+            CollectionSchemaInfo schemaInfo = describeCollectionSchema(collectionName);
+            ensureCollectionDimension(collectionName, schemaInfo.dimension(), properties.getMilvus().getDimension());
+            documentIdFieldEnabled = schemaInfo.fieldNames().contains("document_id");
+            if (!documentIdFieldEnabled) {
+                log.warn("Milvus collection {} does not contain document_id field. Document deletion will fall back to file_name matching.", collectionName);
+            }
             milvusClient.loadCollection(LoadCollectionParam.newBuilder().withCollectionName(collectionName).build());
             return;
         }
@@ -149,6 +179,10 @@ public class MilvusVectorService {
                         .build())
                 .addFieldType(FieldType.newBuilder()
                         .withName("user_id")
+                        .withDataType(DataType.Int64)
+                        .build())
+                .addFieldType(FieldType.newBuilder()
+                        .withName("document_id")
                         .withDataType(DataType.Int64)
                         .build())
                 .addFieldType(FieldType.newBuilder()
@@ -181,27 +215,11 @@ public class MilvusVectorService {
                 .withExtraParam("{\"nlist\":" + properties.getMilvus().getNlist() + "}")
                 .build());
         milvusClient.loadCollection(LoadCollectionParam.newBuilder().withCollectionName(collectionName).build());
+        documentIdFieldEnabled = true;
         log.info("Milvus collection created: {}, dimension={}", collectionName, dimension);
     }
 
-    private void ensureCollectionDimension(String collectionName, int expectedDimension) {
-        R<io.milvus.grpc.DescribeCollectionResponse> response = milvusClient.describeCollection(
-                DescribeCollectionParam.newBuilder()
-                        .withCollectionName(collectionName)
-                        .build()
-        );
-        if (response.getStatus() != R.Status.Success.getCode()) {
-            throw new IllegalStateException("Milvus describe collection failed: " + response.getMessage());
-        }
-
-        int actualDimension = response.getData().getSchema().getFieldsList().stream()
-                .filter(field -> "embedding".equals(field.getName()))
-                .flatMap(field -> field.getTypeParamsList().stream())
-                .filter(param -> "dim".equals(param.getKey()))
-                .map(param -> Integer.parseInt(param.getValue()))
-                .findFirst()
-                .orElseThrow(() -> new IllegalStateException("Milvus collection has no embedding dimension metadata"));
-
+    private void ensureCollectionDimension(String collectionName, int actualDimension, int expectedDimension) {
         if (actualDimension == expectedDimension) {
             return;
         }
@@ -219,6 +237,38 @@ public class MilvusVectorService {
         createCollectionIfNeeded();
     }
 
+    private CollectionSchemaInfo describeCollectionSchema(String collectionName) {
+        R<io.milvus.grpc.DescribeCollectionResponse> response = milvusClient.describeCollection(
+                DescribeCollectionParam.newBuilder()
+                        .withCollectionName(collectionName)
+                        .build()
+        );
+        if (response.getStatus() != R.Status.Success.getCode()) {
+            throw new IllegalStateException("Milvus describe collection failed: " + response.getMessage());
+        }
+
+        DescCollResponseWrapper wrapper = new DescCollResponseWrapper(response.getData());
+        int dimension = wrapper.getFieldByName("embedding").getDimension();
+        Set<String> fieldNames = response.getData().getSchema().getFieldsList().stream()
+                .map(io.milvus.grpc.FieldSchema::getName)
+                .collect(java.util.stream.Collectors.toSet());
+        return new CollectionSchemaInfo(dimension, fieldNames);
+    }
+
+    private String buildDeleteExpr(Long userId, Long documentId, String fileName, boolean admin) {
+        String documentExpr = documentIdFieldEnabled
+                ? "document_id == " + documentId
+                : "file_name == \"" + escapeStringValue(fileName) + "\"";
+        if (admin) {
+            return documentExpr;
+        }
+        return "user_id == " + userId + " and " + documentExpr;
+    }
+
+    private String escapeStringValue(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
     private IndexType resolveIndexType(String indexType) {
         return IndexType.valueOf(indexType);
     }
@@ -232,5 +282,8 @@ public class MilvusVectorService {
         if (milvusClient != null) {
             milvusClient.close();
         }
+    }
+
+    private record CollectionSchemaInfo(int dimension, Set<String> fieldNames) {
     }
 }
