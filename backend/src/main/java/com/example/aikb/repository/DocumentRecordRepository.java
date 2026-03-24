@@ -1,6 +1,7 @@
 package com.example.aikb.repository;
 
 import com.example.aikb.entity.DocumentRecord;
+import com.example.aikb.entity.DocumentStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -37,4 +38,8 @@ public interface DocumentRecordRepository extends JpaRepository<DocumentRecord, 
     List<DocumentRecord> findByUserIdOrderByCreatedAtDesc(Long userId);
 
     List<DocumentRecord> findAllByOrderByCreatedAtDesc();
+
+    List<DocumentRecord> findByUserIdAndStatusOrderByCreatedAtDesc(Long userId, DocumentStatus status);
+
+    List<DocumentRecord> findByStatusOrderByCreatedAtDesc(DocumentStatus status);
 }

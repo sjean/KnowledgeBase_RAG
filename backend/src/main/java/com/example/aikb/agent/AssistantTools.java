@@ -17,16 +17,16 @@ public class AssistantTools {
     }
 
     @Tool("Query the current user's document count from the database")
-    public String queryCurrentUserDocumentCount(Long userId) {
+    public String queryCurrentUserDocumentCount() {
         ToolTrackingHolder.set("queryCurrentUserDocumentCount");
-        long count = documentService.countByUser(userId);
-        return "Current user document count: " + count;
+        long count = documentService.countByUser(AgentExecutionContextHolder.userId());
+        return "当前用户文档数量为 " + count + "。";
     }
 
     @Tool("Query total document count for administrators")
     public String queryTotalDocumentCount() {
         ToolTrackingHolder.set("queryTotalDocumentCount");
-        return "Total document count: " + documentService.countAll();
+        return "当前系统文档总数为 " + documentService.countAll() + "。";
     }
 
     @Tool("Return current system status information")

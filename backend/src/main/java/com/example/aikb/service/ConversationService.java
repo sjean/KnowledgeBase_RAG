@@ -18,6 +18,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -79,6 +80,25 @@ public class ConversationService {
                 .orElseThrow(() -> new IllegalArgumentException("Chat session not found"));
     }
 
+    @Transactional
+    public ChatSessionSummaryResponse renameSession(UserPrincipal principal, Long sessionId, String title) {
+        ChatSession session = loadAccessibleSession(principal, sessionId);
+        String normalizedTitle = normalizeSessionTitle(title);
+        if (normalizedTitle.isBlank()) {
+            throw new IllegalArgumentException("Session title cannot be blank");
+        }
+        session.setTitle(normalizedTitle);
+        session.setUpdatedAt(LocalDateTime.now());
+        return toSummary(chatSessionRepository.save(session));
+    }
+
+    @Transactional
+    public void deleteSession(UserPrincipal principal, Long sessionId) {
+        ChatSession session = loadAccessibleSession(principal, sessionId);
+        chatMessageRepository.deleteBySessionId(session.getId());
+        chatSessionRepository.delete(session);
+    }
+
     public ChatSession createSession(Long userId, String firstQuestion) {
         ChatSession session = new ChatSession();
         session.setUserId(userId);
@@ -88,9 +108,9 @@ public class ConversationService {
         return chatSessionRepository.save(session);
     }
 
-    public void touchSession(ChatSession session) {
+    public ChatSession touchSession(ChatSession session) {
         session.setUpdatedAt(LocalDateTime.now());
-        chatSessionRepository.save(session);
+        return chatSessionRepository.save(session);
     }
 
     public void appendUserMessage(ChatSession session, Long userId, String content) {
@@ -150,7 +170,7 @@ public class ConversationService {
     }
 
     private String buildSessionTitle(String question) {
-        String normalized = question == null ? "新会话" : question.trim().replaceAll("\\s+", " ");
+        String normalized = normalizeSessionTitle(question);
         if (normalized.isBlank()) {
             return "新会话";
         }
@@ -158,6 +178,10 @@ public class ConversationService {
             return normalized;
         }
         return normalized.substring(0, SESSION_TITLE_LIMIT) + "...";
+    }
+
+    private String normalizeSessionTitle(String title) {
+        return title == null ? "" : title.trim().replaceAll("\\s+", " ");
     }
 
     private int sanitizePageSize(int requestedSize, int defaultSize) {

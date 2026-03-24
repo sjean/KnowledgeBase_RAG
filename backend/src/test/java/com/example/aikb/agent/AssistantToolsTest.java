@@ -3,49 +3,41 @@ package com.example.aikb.agent;
 import com.example.aikb.service.DocumentService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.when;
 
-@ExtendWith(MockitoExtension.class)
 class AssistantToolsTest {
-
-    @Mock
-    private DocumentService documentService;
 
     @AfterEach
     void tearDown() {
         ToolTrackingHolder.clear();
+        AgentExecutionContextHolder.clear();
     }
 
     @Test
     void queryCurrentUserDocumentCountShouldUseServiceAndTrackTool() {
-        when(documentService.countByUser(3L)).thenReturn(5L);
-        AssistantTools assistantTools = new AssistantTools(documentService);
+        AssistantTools assistantTools = new AssistantTools(new StubDocumentService(5L, 12L));
+        AgentExecutionContextHolder.set(3L, "USER");
 
-        String result = assistantTools.queryCurrentUserDocumentCount(3L);
+        String result = assistantTools.queryCurrentUserDocumentCount();
 
-        assertThat(result).isEqualTo("Current user document count: 5");
+        assertThat(result).isEqualTo("当前用户文档数量为 5。");
         assertThat(ToolTrackingHolder.get()).isEqualTo("queryCurrentUserDocumentCount");
     }
 
     @Test
     void queryTotalDocumentCountShouldUseServiceAndTrackTool() {
-        when(documentService.countAll()).thenReturn(12L);
-        AssistantTools assistantTools = new AssistantTools(documentService);
+        AssistantTools assistantTools = new AssistantTools(new StubDocumentService(5L, 12L));
 
         String result = assistantTools.queryTotalDocumentCount();
 
-        assertThat(result).isEqualTo("Total document count: 12");
+        assertThat(result).isEqualTo("当前系统文档总数为 12。");
         assertThat(ToolTrackingHolder.get()).isEqualTo("queryTotalDocumentCount");
     }
 
     @Test
     void currentSystemStatusShouldReturnSummaryAndTrackTool() {
-        AssistantTools assistantTools = new AssistantTools(documentService);
+        AssistantTools assistantTools = new AssistantTools(new StubDocumentService(5L, 12L));
 
         String result = assistantTools.currentSystemStatus();
 
@@ -54,5 +46,27 @@ class AssistantToolsTest {
         assertThat(result).contains("usedMemoryMb=");
         assertThat(result).contains("javaVersion=");
         assertThat(ToolTrackingHolder.get()).isEqualTo("currentSystemStatus");
+    }
+
+    private static class StubDocumentService extends DocumentService {
+
+        private final long userCount;
+        private final long totalCount;
+
+        private StubDocumentService(long userCount, long totalCount) {
+            super(null, null, null, null, null, null, null);
+            this.userCount = userCount;
+            this.totalCount = totalCount;
+        }
+
+        @Override
+        public long countByUser(Long userId) {
+            return userCount;
+        }
+
+        @Override
+        public long countAll() {
+            return totalCount;
+        }
     }
 }

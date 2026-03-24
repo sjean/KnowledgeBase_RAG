@@ -103,7 +103,11 @@ public class MilvusVectorService {
     }
 
     public List<SourceItem> search(Long userId, List<Float> queryVector, int topK, boolean admin) {
-        String expr = admin ? "" : "user_id == " + userId;
+        return search(userId, queryVector, topK, admin, List.of());
+    }
+
+    public List<SourceItem> search(Long userId, List<Float> queryVector, int topK, boolean admin, List<String> preferredFileNames) {
+        String expr = buildSearchExpr(userId, admin, preferredFileNames);
         SearchParam searchParam = SearchParam.newBuilder()
                 .withCollectionName(properties.getMilvus().getCollectionName())
                 .withMetricType(resolveMetricType(properties.getMilvus().getMetricType()))
@@ -263,6 +267,25 @@ public class MilvusVectorService {
             return documentExpr;
         }
         return "user_id == " + userId + " and " + documentExpr;
+    }
+
+    private String buildSearchExpr(Long userId, boolean admin, List<String> preferredFileNames) {
+        String userExpr = admin ? "" : "user_id == " + userId;
+        if (preferredFileNames == null || preferredFileNames.isEmpty()) {
+            return userExpr;
+        }
+
+        String fileExpr = preferredFileNames.stream()
+                .distinct()
+                .map(fileName -> "file_name == \"" + escapeStringValue(fileName) + "\"")
+                .reduce((left, right) -> left + " or " + right)
+                .map(expression -> "(" + expression + ")")
+                .orElse("");
+
+        if (userExpr.isBlank()) {
+            return fileExpr;
+        }
+        return userExpr + " and " + fileExpr;
     }
 
     private String escapeStringValue(String value) {

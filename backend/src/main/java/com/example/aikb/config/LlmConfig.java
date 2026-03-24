@@ -2,6 +2,7 @@ package com.example.aikb.config;
 
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.model.openai.OpenAiEmbeddingModel;
+import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -12,6 +13,18 @@ public class LlmConfig {
     public OpenAiChatModel openAiChatModel(AppProperties properties) {
         AppProperties.Llm llm = properties.getLlm();
         return OpenAiChatModel.builder()
+                .apiKey(llm.getApiKey())
+                .baseUrl(llm.getBaseUrl())
+                .modelName(llm.getModelName())
+                .logRequests(llm.isLogRequests())
+                .logResponses(llm.isLogResponses())
+                .build();
+    }
+
+    @Bean
+    public OpenAiStreamingChatModel openAiStreamingChatModel(AppProperties properties) {
+        AppProperties.Llm llm = properties.getLlm();
+        return OpenAiStreamingChatModel.builder()
                 .apiKey(llm.getApiKey())
                 .baseUrl(llm.getBaseUrl())
                 .modelName(llm.getModelName())

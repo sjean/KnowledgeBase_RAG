@@ -25,9 +25,23 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
+import java.util.Locale;
+import java.util.Set;
 
 @Service
 public class DocumentService {
+
+    private static final List<String> QUESTION_NOISE_TERMS = List.of(
+            "请", "帮我", "帮忙", "一下", "总结一下", "总结", "概括", "介绍", "分析",
+            "看下", "看一下", "说说", "讲讲", "给我", "这份", "这个", "该", "文档", "文件",
+            "内容", "主要", "关于", "里面", "存在", "有个", "有一个"
+    );
+
+    private static final List<String> FILE_NAME_NOISE_TERMS = List.of(
+            "附答案", "完整版", "最终版", "最新", "资料", "文档", "文件"
+    );
 
     private final AppProperties properties;
     private final DocumentRecordRepository documentRecordRepository;
@@ -85,6 +99,28 @@ public class DocumentService {
 
     public long countAll() {
         return documentRecordRepository.count();
+    }
+
+    public List<String> detectMentionedFileNames(Long userId, boolean admin, String question) {
+        String normalizedQuestion = normalizeQuestion(question);
+        String questionCore = stripQuestionNoise(normalizedQuestion);
+        if (questionCore.isBlank()) {
+            return List.of();
+        }
+
+        List<DocumentRecord> accessibleReadyDocuments = admin
+                ? documentRecordRepository.findByStatusOrderByCreatedAtDesc(DocumentStatus.READY)
+                : documentRecordRepository.findByUserIdAndStatusOrderByCreatedAtDesc(userId, DocumentStatus.READY);
+
+        return accessibleReadyDocuments.stream()
+                .map(DocumentRecord::getFileName)
+                .distinct()
+                .map(fileName -> new FileNameMatch(fileName, calculateFileMatchScore(questionCore, fileName)))
+                .filter(match -> match.score() > 0)
+                .sorted(Comparator.comparingInt(FileNameMatch::score).reversed()
+                        .thenComparing(match -> match.fileName().length(), Comparator.reverseOrder()))
+                .map(FileNameMatch::fileName)
+                .toList();
     }
 
     public List<DocumentItemResponse> listDocuments() {
@@ -230,6 +266,113 @@ public class DocumentService {
 
     private String normalizeKeyword(String keyword) {
         return keyword == null ? "" : keyword.trim();
+    }
+
+    private String normalizeQuestion(String question) {
+        return question == null ? "" : question
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("\\.[a-z0-9]+$", "")
+                .replaceAll("[\\p{Punct}\\p{IsPunctuation}·•，。！？；：、“”‘’（）()【】\\[\\]<>《》\\-_/\\\\]+", "")
+                .replaceAll("\\s+", "");
+    }
+
+    private String stripQuestionNoise(String normalizedQuestion) {
+        String result = normalizedQuestion;
+        for (String noiseTerm : QUESTION_NOISE_TERMS) {
+            result = result.replace(normalizeQuestion(noiseTerm), "");
+        }
+        return result;
+    }
+
+    private int calculateFileMatchScore(String questionCore, String fileName) {
+        if (questionCore.isBlank()) {
+            return 0;
+        }
+
+        return buildFileAliases(fileName).stream()
+                .mapToInt(alias -> scoreAliasMatch(questionCore, alias))
+                .max()
+                .orElse(0);
+    }
+
+    private Set<String> buildFileAliases(String fileName) {
+        Set<String> aliases = new LinkedHashSet<>();
+        String normalizedFileName = normalizeQuestion(fileName);
+        if (!normalizedFileName.isBlank()) {
+            aliases.add(normalizedFileName);
+        }
+
+        String withoutExtension = fileName == null ? "" : fileName.replaceFirst("\\.[^.]+$", "");
+        String normalizedWithoutExtension = normalizeQuestion(withoutExtension);
+        if (!normalizedWithoutExtension.isBlank()) {
+            aliases.add(normalizedWithoutExtension);
+        }
+
+        String withoutBrackets = withoutExtension.replaceAll("[（(【\\[].*?[）)】\\]]", "");
+        String normalizedWithoutBrackets = normalizeQuestion(withoutBrackets);
+        if (!normalizedWithoutBrackets.isBlank()) {
+            aliases.add(normalizedWithoutBrackets);
+        }
+
+        String simplified = normalizedWithoutBrackets;
+        for (String noiseTerm : FILE_NAME_NOISE_TERMS) {
+            simplified = simplified.replace(normalizeQuestion(noiseTerm), "");
+        }
+        if (!simplified.isBlank()) {
+            aliases.add(simplified);
+        }
+
+        return aliases;
+    }
+
+    private int scoreAliasMatch(String questionCore, String alias) {
+        if (alias.isBlank()) {
+            return 0;
+        }
+        if (alias.contains(questionCore)) {
+            return 120 + questionCore.length();
+        }
+        if (questionCore.contains(alias) && alias.length() >= 2) {
+            return 90 + alias.length();
+        }
+        if (isSubsequence(questionCore, alias) && questionCore.length() >= 2) {
+            return 70 + questionCore.length();
+        }
+
+        int commonLength = longestCommonSubstringLength(questionCore, alias);
+        if (commonLength >= Math.max(2, questionCore.length() - 1)) {
+            return 40 + commonLength;
+        }
+        return 0;
+    }
+
+    private boolean isSubsequence(String needle, String haystack) {
+        int needleIndex = 0;
+        int haystackIndex = 0;
+        while (needleIndex < needle.length() && haystackIndex < haystack.length()) {
+            if (needle.charAt(needleIndex) == haystack.charAt(haystackIndex)) {
+                needleIndex++;
+            }
+            haystackIndex++;
+        }
+        return needleIndex == needle.length();
+    }
+
+    private int longestCommonSubstringLength(String left, String right) {
+        int[][] dp = new int[left.length() + 1][right.length() + 1];
+        int max = 0;
+        for (int i = 1; i <= left.length(); i++) {
+            for (int j = 1; j <= right.length(); j++) {
+                if (left.charAt(i - 1) == right.charAt(j - 1)) {
+                    dp[i][j] = dp[i - 1][j - 1] + 1;
+                    max = Math.max(max, dp[i][j]);
+                }
+            }
+        }
+        return max;
+    }
+
+    private record FileNameMatch(String fileName, int score) {
     }
 
     private int sanitizePageSize(int size) {
